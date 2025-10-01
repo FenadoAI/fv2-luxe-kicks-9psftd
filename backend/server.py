@@ -65,6 +65,80 @@ class SearchResponse(BaseModel):
     error: Optional[str] = None
 
 
+# E-Commerce Models
+class Product(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    description: str
+    price: float
+    colors: List[str]
+    images: List[str]
+    category: str
+    featured: bool = False
+    stock: int = 0
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ProductCreate(BaseModel):
+    name: str
+    description: str
+    price: float
+    colors: List[str]
+    images: List[str]
+    category: str
+    featured: bool = False
+    stock: int = 0
+
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    price: Optional[float] = None
+    colors: Optional[List[str]] = None
+    images: Optional[List[str]] = None
+    category: Optional[str] = None
+    featured: Optional[bool] = None
+    stock: Optional[int] = None
+
+
+class OrderItem(BaseModel):
+    product_id: str
+    product_name: str
+    quantity: int
+    price: float
+    color: str
+
+
+class CustomerInfo(BaseModel):
+    name: str
+    email: str
+    phone: str
+    address: str
+    city: str
+    postal_code: str
+
+
+class Order(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    items: List[OrderItem]
+    total: float
+    customer_info: CustomerInfo
+    payment_method: str = "COD"
+    status: str = "pending"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class OrderCreate(BaseModel):
+    items: List[OrderItem]
+    total: float
+    customer_info: CustomerInfo
+    payment_method: str = "COD"
+
+
+class OrderStatusUpdate(BaseModel):
+    status: str
+
+
 def _ensure_db(request: Request):
     try:
         return request.app.state.db
@@ -234,6 +308,109 @@ async def get_agent_capabilities(request: Request):
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Error getting capabilities")
         return {"success": False, "error": str(exc)}
+
+
+# Product Endpoints
+@api_router.get("/products", response_model=List[Product])
+async def get_products(
+    request: Request,
+    color: Optional[str] = None,
+    category: Optional[str] = None,
+    featured: Optional[bool] = None,
+):
+    db = _ensure_db(request)
+    query = {}
+    if color:
+        query["colors"] = color
+    if category:
+        query["category"] = category
+    if featured is not None:
+        query["featured"] = featured
+
+    products = await db.products.find(query).to_list(1000)
+    return [Product(**product) for product in products]
+
+
+@api_router.get("/products/{product_id}", response_model=Product)
+async def get_product(product_id: str, request: Request):
+    db = _ensure_db(request)
+    product = await db.products.find_one({"id": product_id})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return Product(**product)
+
+
+@api_router.post("/products", response_model=Product)
+async def create_product(product_input: ProductCreate, request: Request):
+    db = _ensure_db(request)
+    product = Product(**product_input.model_dump())
+    await db.products.insert_one(product.model_dump())
+    return product
+
+
+@api_router.put("/products/{product_id}", response_model=Product)
+async def update_product(product_id: str, product_update: ProductUpdate, request: Request):
+    db = _ensure_db(request)
+    existing = await db.products.find_one({"id": product_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    update_data = {k: v for k, v in product_update.model_dump().items() if v is not None}
+    if update_data:
+        await db.products.update_one({"id": product_id}, {"$set": update_data})
+
+    updated_product = await db.products.find_one({"id": product_id})
+    return Product(**updated_product)
+
+
+@api_router.delete("/products/{product_id}")
+async def delete_product(product_id: str, request: Request):
+    db = _ensure_db(request)
+    result = await db.products.delete_one({"id": product_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return {"success": True, "message": "Product deleted"}
+
+
+# Order Endpoints
+@api_router.post("/orders", response_model=Order)
+async def create_order(order_input: OrderCreate, request: Request):
+    db = _ensure_db(request)
+    order = Order(**order_input.model_dump())
+    await db.orders.insert_one(order.model_dump())
+    return order
+
+
+@api_router.get("/orders", response_model=List[Order])
+async def get_orders(request: Request, email: Optional[str] = None):
+    db = _ensure_db(request)
+    query = {}
+    if email:
+        query["customer_info.email"] = email
+
+    orders = await db.orders.find(query).sort("created_at", -1).to_list(1000)
+    return [Order(**order) for order in orders]
+
+
+@api_router.get("/orders/{order_id}", response_model=Order)
+async def get_order(order_id: str, request: Request):
+    db = _ensure_db(request)
+    order = await db.orders.find_one({"id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return Order(**order)
+
+
+@api_router.patch("/orders/{order_id}/status", response_model=Order)
+async def update_order_status(order_id: str, status_update: OrderStatusUpdate, request: Request):
+    db = _ensure_db(request)
+    existing = await db.orders.find_one({"id": order_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    await db.orders.update_one({"id": order_id}, {"$set": {"status": status_update.status}})
+    updated_order = await db.orders.find_one({"id": order_id})
+    return Order(**updated_order)
 
 
 app.include_router(api_router)
